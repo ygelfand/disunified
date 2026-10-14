@@ -25,6 +25,7 @@ type ProvisionResult struct {
 	RenamedPorts  int
 	Seeded        int      // ports whose config was written from the switch
 	Cleared       int      // released slots whose stale overrides were dropped
+	Aggregations  int      // missing aggregation groups seeded from the switch
 	Notes         []string // ports that could not be seeded, with the reason
 }
 
@@ -38,6 +39,11 @@ type ProvisionResult struct {
 // seeded from its own state (see seedOverrides).
 func (c *Client) Provision(ctx context.Context, mac string, snap *devicemodel.Snapshot, namer devicemodel.Namer, defaultDeviceNames []string, isDefaultPortName func(idx int, name string) bool, seed bool) (ProvisionResult, error) {
 	var res ProvisionResult
+	if c.SyncNames {
+		if err := c.loadNameState(); err != nil {
+			return res, err
+		}
+	}
 	dev, err := c.DeviceByMAC(ctx, mac)
 	if err != nil {
 		return res, err
@@ -47,7 +53,7 @@ func (c *Client) Provision(ctx context.Context, mac string, snap *devicemodel.Sn
 		seed = false
 	}
 	var nets []Network
-	if seed {
+	if seed || (c.SyncLAGs && !c.PowerPath) {
 		if nets, err = c.Networks(ctx); err != nil {
 			return res, err
 		}
@@ -82,10 +88,18 @@ func (c *Client) Provision(ctx context.Context, mac string, snap *devicemodel.Sn
 		}
 	}
 	changed := false
+	nextNames := make(map[int]nameObservation, len(c.nameState))
+	for idx, observation := range c.nameState {
+		nextNames[idx] = observation
+	}
 	for _, p := range snap.Ports {
 		wantName := namer.PortName(p)
 		cur := current[p.Index]
-		if wantName == "" || cur == wantName || (cur != "" && !isDefaultPortName(p.Index, cur)) {
+		writeName := cur != wantName && (cur == "" || isDefaultPortName(p.Index, cur))
+		if c.SyncNames && p.Present && p.IfName != "" {
+			nextNames[p.Index], writeName = nextNameObservation(c.nameState[p.Index], p, wantName, cur, cur == "" || isDefaultPortName(p.Index, cur))
+		}
+		if wantName == "" || !writeName {
 			continue
 		}
 		o := overrides[p.Index]
@@ -124,6 +138,12 @@ func (c *Client) Provision(ctx context.Context, mac string, snap *devicemodel.Sn
 			changed = true
 		}
 	}
+	if c.SyncLAGs && !c.PowerPath {
+		var notes []string
+		res.Aggregations, notes = seedAggregations(snap, nets, overrides)
+		res.Notes = append(res.Notes, notes...)
+		changed = changed || res.Aggregations > 0
+	}
 	if changed {
 		list := make([]map[string]any, 0, len(overrides))
 		for _, o := range overrides {
@@ -133,6 +153,9 @@ func (c *Client) Provision(ctx context.Context, mac string, snap *devicemodel.Sn
 		fields["port_overrides"] = list
 	}
 	if len(fields) == 0 {
+		if c.SyncNames {
+			return res, c.saveNameState(nextNames)
+		}
 		return res, nil
 	}
 	for _, o := range dev.OOBPortConfig {
@@ -142,6 +165,11 @@ func (c *Client) Provision(ctx context.Context, mac string, snap *devicemodel.Sn
 	}
 	if err := c.UpdateDevice(ctx, dev.ID, fields); err != nil {
 		return res, fmt.Errorf("provision: %w", err)
+	}
+	if c.SyncNames {
+		if err := c.saveNameState(nextNames); err != nil {
+			return res, fmt.Errorf("persist name sync state: %w", err)
+		}
 	}
 	return res, nil
 }

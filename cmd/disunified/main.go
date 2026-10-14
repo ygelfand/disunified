@@ -42,6 +42,7 @@ import (
 	_ "github.com/TechBlueprints/disunified/internal/drivers/apc-pdu"
 	_ "github.com/TechBlueprints/disunified/internal/drivers/apc-ups"
 	_ "github.com/TechBlueprints/disunified/internal/drivers/arista-eos"
+	_ "github.com/TechBlueprints/disunified/internal/drivers/cisco-iosxe"
 	_ "github.com/TechBlueprints/disunified/internal/drivers/podman"
 	_ "github.com/TechBlueprints/disunified/internal/drivers/proxmox"
 )
@@ -56,13 +57,14 @@ func main() {
 		configPath = flag.String("config", envChain("", "DUI_CONFIG", "STU_CONFIG"), "YAML config file (deploy/config.example.yaml): one controller, any number of devices; the flags below then apply only as one-shots")
 
 		// Controller side
-		controller = flag.String("controller", envChain("", "DUI_CONTROLLER", "STU_CONTROLLER"), "controller host or IP; the inform URL becomes http://<ip>:8080/inform")
-		informURL  = flag.String("inform", envChain("", "DUI_INFORM_URL", "STU_INFORM_URL"), "full inform URL (overrides -controller); must contain an IP literal")
-		model      = flag.String("model", envChain("auto", "DUI_MODEL", "STU_MODEL"), "UniFi model string to claim, or \"auto\" to pick the best catalogue match for the device's port layout")
-		udapiVer   = flag.String("udapi-version", envChain("1.0.0", "DUI_UDAPI_VERSION", "STU_UDAPI_VERSION"), "UDAPI schema version to report; the controller only stores capability claims when this is set (\"\" = omit)")
-		interval   = flag.Duration("interval", envDuration(10*time.Second, "DUI_INTERVAL", "STU_INTERVAL"), "initial inform interval; the controller then sets its own")
-		recordDir  = flag.String("record-dir", envChain("inform-log", "DUI_RECORD_DIR", "STU_RECORD_DIR"), "directory for the NDJSON reply log (\"\" disables)")
-		stateFile  = flag.String("state", envChain("state/device.json", "DUI_STATE", "STU_STATE"), "file holding the adopted key and provisioned config across restarts")
+		controller     = flag.String("controller", envChain("", "DUI_CONTROLLER", "STU_CONTROLLER"), "controller host or IP; the inform URL becomes http://<ip>:8080/inform")
+		informURL      = flag.String("inform", envChain("", "DUI_INFORM_URL", "STU_INFORM_URL"), "full inform URL (overrides -controller); must contain an IP literal")
+		model          = flag.String("model", envChain("auto", "DUI_MODEL", "STU_MODEL"), "UniFi model string to claim, or \"auto\" to pick the best catalogue match for the device's port layout")
+		udapiVer       = flag.String("udapi-version", envChain("1.0.0", "DUI_UDAPI_VERSION", "STU_UDAPI_VERSION"), "UDAPI schema version to report; the controller only stores capability claims when this is set (\"\" = omit)")
+		interval       = flag.Duration("interval", envDuration(10*time.Second, "DUI_INTERVAL", "STU_INTERVAL"), "initial inform interval; the controller then sets its own")
+		collectTimeout = flag.Duration("collect-timeout", envDuration(20*time.Second, "DUI_COLLECT_TIMEOUT"), "deadline for a complete device poll and control cycle")
+		recordDir      = flag.String("record-dir", envChain("inform-log", "DUI_RECORD_DIR", "STU_RECORD_DIR"), "directory for the NDJSON reply log (\"\" disables)")
+		stateFile      = flag.String("state", envChain("state/device.json", "DUI_STATE", "STU_STATE"), "file holding the adopted key and provisioned config across restarts")
 
 		// Identity (defaults come from the device when a driver is configured)
 		mac      = flag.String("mac", envChain("", "DUI_MAC", "STU_MAC"), "device MAC to present (default: the device's system MAC)")
@@ -94,6 +96,8 @@ func main() {
 		// Controller REST API (names)
 		unifiURL  = flag.String("unifi-url", envChain("", "DUI_UNIFI_URL", "STU_UNIFI_URL"), "controller URL for the REST API, e.g. https://unifi.example.net (needs STU_UNIFI_API_KEY)")
 		unifiSite = flag.String("unifi-site", envChain("default", "DUI_UNIFI_SITE", "STU_UNIFI_SITE"), "controller site")
+		syncLAGs  = flag.Bool("sync-lags", false, "seed missing controller LAG configuration through the optional REST API")
+		syncNames = flag.Bool("sync-names", false, "synchronize port names in bridge-observed change order through the optional API")
 		provision = flag.Bool("provision-names", envChain("1", "DUI_PROVISION_NAMES", "STU_PROVISION_NAMES") != "0", "name the device \"<vendor> <model>\" and ports after the device's interfaces via the REST API, touching only controller-default names (needs -unifi-url)")
 
 		// One-shots
@@ -154,6 +158,8 @@ func main() {
 	}
 
 	o := options{
+		syncLAGs:   *syncLAGs,
+		syncNames:  *syncNames,
 		controller: *controller, informURL: *informURL, model: *model, udapiVersion: *udapiVer,
 		interval: *interval, recordDir: *recordDir, stateFile: *stateFile,
 		mac: *mac, serial: *serial, ip: *ip, hostname: *hostname, version: *version, uplink: *uplink,
@@ -163,7 +169,7 @@ func main() {
 		controlPorts: *controlPorts, controlOutlets: *controlOutlets, controlAddress: *controlAddress, controlIGMP: *controlIGMP, controlNTP: *controlNTP, controlSyslog: *controlSyslog,
 		controlReboot: *controlReboot, controlSSH: *controlSSH, controlSNMP: *controlSNMP, controlNUT: *controlNUT,
 		unifiURL: *unifiURL, unifiSite: *unifiSite, unifiKey: envChain("", "DUI_UNIFI_API_KEY", "STU_UNIFI_API_KEY"), provision: *provision,
-		collectOnce: *collectOnce, logger: log.Default(),
+		collectOnce: *collectOnce, logger: log.Default(), collectTimeout: *collectTimeout,
 	}
 	if err := runOne(ctx, o); err != nil {
 		log.Fatal(err)
@@ -187,9 +193,12 @@ type options struct {
 	controlReboot, controlSSH, controlSNMP     bool
 	controlNUT                                 bool
 	allowInitialChanges, noSeed                bool
+	syncLAGs                                   bool
+	syncNames                                  bool
 	unifiURL, unifiSite, unifiKey              string
 	provision                                  bool
 	collectOnce                                bool
+	collectTimeout                             time.Duration
 	logger                                     *log.Logger
 	stateDir                                   string
 }
@@ -208,12 +217,15 @@ func runConfig(ctx context.Context, f *config.File) {
 			stateFile: filepath.Join(f.StateDir, "state", sw.Name, "device.json"),
 			ip:        sw.IP, hostname: sw.Hostname, uplink: sw.UplinkPort,
 			driver: sw.Driver, deviceURL: sw.URL, deviceSSH: sw.SSH, username: sw.Username, password: sw.Password,
-			driverOptions: sw.Options,
-			controlPorts:  sw.Control.Ports, controlOutlets: sw.Control.Outlets, controlAddress: sw.Control.Address, controlIGMP: sw.Control.IGMP, controlNTP: sw.Control.NTP, controlSyslog: sw.Control.Syslog,
+			driverOptions:  sw.Options,
+			collectTimeout: sw.CollectTimeout,
+			controlPorts:   sw.Control.Ports, controlOutlets: sw.Control.Outlets, controlAddress: sw.Control.Address, controlIGMP: sw.Control.IGMP, controlNTP: sw.Control.NTP, controlSyslog: sw.Control.Syslog,
 			controlReboot: sw.Control.Reboot, controlSSH: sw.Control.SSHKeys, controlSNMP: sw.Control.SNMP, controlNUT: sw.Control.NUT,
 			allowInitialChanges: sw.Control.AllowInitialChanges, noSeed: sw.Control.NoSeed,
 			unifiURL: f.Controller.APIURL, unifiSite: f.Controller.Site, unifiKey: f.Controller.APIKey(), provision: true,
-			logger: logger, stateDir: filepath.Join(f.StateDir, "state", sw.Name),
+			syncLAGs:  f.Controller.SyncLAGs,
+			syncNames: f.Controller.SyncNames,
+			logger:    logger, stateDir: filepath.Join(f.StateDir, "state", sw.Name),
 		}
 		if strings.EqualFold(o.controlPorts, "off") {
 			o.controlPorts = ""
@@ -251,6 +263,9 @@ func openAndStart(ctx context.Context, drv devicemodel.Driver, cfg devicemodel.D
 
 // runOne bridges one switch until ctx is cancelled.
 func runOne(ctx context.Context, o options) error {
+	if (o.syncLAGs || o.syncNames) && (!o.provision || o.unifiURL == "" || o.unifiKey == "") {
+		return errors.New("API synchronization requires API provisioning, a controller API URL, and an API key")
+	}
 	log := o.logger
 
 	// --- Device ---
@@ -326,6 +341,7 @@ func runOne(ctx context.Context, o options) error {
 	}
 
 	// --- Identity ---
+	uplinkPinned := o.uplink > 0
 	if snap != nil {
 		if o.mac == "" {
 			o.mac = snap.System.MAC
@@ -365,6 +381,15 @@ func runOne(ctx context.Context, o options) error {
 	}
 
 	// --- Model ---
+	autoModel := o.model == "auto"
+	store := &device.Store{Path: o.stateFile}
+	st, err := store.Load()
+	if err != nil {
+		return err
+	}
+	if autoModel && st.Adopted && st.Model != "" {
+		o.model = st.Model
+	}
 	if o.model == "auto" {
 		if snap == nil {
 			return errors.New("-model auto needs a switch connection; pass -model explicitly otherwise")
@@ -425,11 +450,6 @@ func runOne(ctx context.Context, o options) error {
 	desc.FWCaps = device.FWCapsFor(caps)
 
 	// --- Session ---
-	store := &device.Store{Path: o.stateFile}
-	st, err := store.Load()
-	if err != nil {
-		return err
-	}
 	if st.Adopted {
 		log.Printf("resuming adopted state from %s (cfgversion %s, gcm=%v)", o.stateFile, st.CfgVersion, st.UseAESGCM)
 	}
@@ -502,6 +522,9 @@ func runOne(ctx context.Context, o options) error {
 		} else {
 			api := unifiapi.New(o.unifiURL, key, o.unifiSite, true)
 			api.PowerPath = desc.Type == "usp"
+			api.SyncLAGs = o.syncLAGs
+			api.SyncNames = o.syncNames
+			api.NameStatePath = filepath.Join(filepath.Dir(o.stateFile), "names.json")
 			seed := !o.noSeed && o.controlPorts != ""
 			var last time.Time
 			provision = func(snap *devicemodel.Snapshot) {
@@ -518,8 +541,11 @@ func runOne(ctx context.Context, o options) error {
 				switch {
 				case err != nil:
 					log.Printf("%v (retried on the next layout change or held push)", err)
-				case r.RenamedDevice || r.RenamedPorts > 0 || r.Seeded > 0 || r.Cleared > 0:
+				case r.RenamedDevice || r.RenamedPorts > 0 || r.Seeded > 0 || r.Cleared > 0 || r.Aggregations > 0:
 					log.Printf("provision: device renamed=%v, %d ports named after the switch, %d ports seeded from the switch's own config, %d released slots cleared", r.RenamedDevice, r.RenamedPorts, r.Seeded, r.Cleared)
+					if r.Aggregations > 0 {
+						log.Printf("provision: %d aggregation groups seeded from the switch", r.Aggregations)
+					}
 				}
 				// Outlet slots the model draws but the device lacks: the
 				// controller's default override shows them powered; set it
@@ -544,13 +570,47 @@ func runOne(ctx context.Context, o options) error {
 
 	// --- Loop ---
 	loopCfg := informloop.Config{
-		Logger:     log,
-		NUT:        nutApplier(nut),
-		Interval:   o.interval,
-		RecordDir:  o.recordDir,
-		DeviceHost: hostOf(o.deviceURL, o.deviceSSH),
-		GatewayIP:  o.controller,
+		Logger:         log,
+		NUT:            nutApplier(nut),
+		Interval:       o.interval,
+		CollectTimeout: o.collectTimeout,
+		RecordDir:      o.recordDir,
+		DeviceHost:     hostOf(o.deviceURL, o.deviceSSH),
+		GatewayIP:      o.controller,
 		OnLayoutChange: func(snap *devicemodel.Snapshot) {
+			if autoModel && !sess.Adopted() {
+				candidate, err := unifimodel.SuggestFor(snap)
+				if err != nil {
+					log.Printf("model selection: %v", err)
+				} else if candidate.Model != desc.Model {
+					up := snap.UplinkPort()
+					if uplinkPinned {
+						up = o.uplink
+					}
+					updated, err := device.DescriptorFor(candidate.Model, snap, device.Identity{MAC: desc.MAC, Serial: desc.Serial, IP: desc.IP, Hostname: desc.Hostname, Version: desc.Version, UDAPIVersion: desc.UDAPIVersion, UplinkPort: up})
+					if err == nil {
+						updated.FWCaps = desc.FWCaps
+						err = sess.SetPendingProfile(updated)
+					}
+					if err != nil {
+						log.Printf("profile change: %v", err)
+					} else {
+						desc = updated
+						profile, _ = emu.Profile(candidate.Model)
+						clear(defaults)
+						for idx, names := range defaultPortNames(desc.Ports, snap, namer) {
+							defaults[idx] = names
+						}
+						log.Printf("model: selected %s for updated port layout", candidate.Model)
+					}
+				}
+			}
+			for _, p := range snap.Ports {
+				if p.Index > len(desc.Ports) {
+					log.Printf("port layout exceeds model %s at port %d; configure a larger model to expose these ports", desc.Model, p.Index)
+					break
+				}
+			}
 			if provision != nil {
 				provision(snap)
 			}
@@ -565,6 +625,13 @@ func runOne(ctx context.Context, o options) error {
 				provision(snap)
 			}
 		},
+	}
+	if (o.syncLAGs || o.syncNames) && provision != nil {
+		loopCfg.OnCollected = provision
+	}
+	loopCfg.SyncNames = o.syncNames
+	if uplinkPinned {
+		loopCfg.UplinkPort = o.uplink
 	}
 	if sw != nil {
 		loopCfg.Collector = sw

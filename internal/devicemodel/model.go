@@ -34,7 +34,8 @@ type PortDesired struct {
 	Enabled     bool
 	Description string
 
-	SpeedMbps int // 0 = auto
+	SpeedMbps int    // 0 = auto
+	PoEMode   string // "auto" or "off"; empty leaves inline power unchanged
 
 	VLANSet     bool // false = leave VLAN config alone
 	NativeVLAN  int
@@ -193,13 +194,34 @@ type Snapshot struct {
 
 	// UplinkHint is the driver's own idea of the uplink port when LLDP is
 	// silent (a virtual switch knows which physical NIC carries it); 0 = none.
-	UplinkHint int
+	UplinkHint   int
+	Aggregations []Aggregation // operational aggregate membership
 }
 
-// UplinkPort returns the port carrying the LLDP neighbour that looks like
-// the upstream switch (a bridge that is also a router wins, else the first
-// bridge), or 0 if none.
+// Aggregation is a logical bundle mapped to its physical member ports.
+type Aggregation struct {
+	ID          int
+	Name        string
+	Up          bool
+	Counters    Counters
+	HasCounters bool
+	Members     []AggregationMember
+}
+
+// AggregationMember describes an interface reported by operational aggregate
+// state. Active requires both aggregate and member operational status to be up.
+type AggregationMember struct {
+	PortIndex int
+	Active    bool
+	SpeedMbps int
+}
+
+// UplinkPort returns the driver's hint when supplied, otherwise an LLDP
+// candidate (a bridge/router wins, else the first bridge), or 0 if none.
 func (s *Snapshot) UplinkPort() int {
+	if s.UplinkHint > 0 {
+		return s.UplinkHint
+	}
 	best := 0
 	for _, p := range s.Ports {
 		if p.Neighbor == nil || !p.Neighbor.IsBridge || !p.Up {
@@ -255,8 +277,10 @@ type System struct {
 	HasTemperature bool
 	Overheating    bool
 
-	Fans []Fan
-	PSUs []PSU
+	Fans          []Fan
+	PoEBudgetW    float64 // available PSE budget, separate from PSU capacity
+	PoEAllocatedW float64 // allocated PSE power, not measured consumption
+	PSUs          []PSU
 
 	// Aggregate power for a device that measures its whole load rather than
 	// each outlet (a switched rack PDU meters the phase, not the outlet).
@@ -417,7 +441,19 @@ type Port struct {
 	StormCtrl    *StormControlSpec // nil = none configured
 	Optic        *Optic            // nil for copper or an empty cage
 	MACs         []MACEntry        // addresses learned on this port
+	PoE          *PoE              // nil for ports without discovered inline-power support
 	Health       PortHealth        // fault and change signals (anomaly reporting)
+}
+
+// PoE describes one power-sourcing port without assuming an attached device.
+type PoE struct {
+	Mode        string // auto, off, or static
+	Delivering  bool
+	SupportsAT  bool
+	PowerW      float64
+	HasMetering bool
+	MaxPowerW   float64
+	Class       string
 }
 
 // Outlet is one outlet on a power device. Outlets are to a PDU what ports are
@@ -566,6 +602,8 @@ type Capabilities struct {
 	Jumbo         bool // jumbo frames (reported and/or switchable)
 	FEC           bool // per-port forward error correction
 	LACP          bool // link aggregation (Controller honours PortDesired.LAG)
+	LAGReporting  bool // operational aggregation telemetry without configuration control
+	PoE           bool // per-port inline power control
 	StormControl  bool // per-port storm control in percent
 	IGMPSnooping  bool // IGMP snooping (DeviceController honours IGMPSnooping)
 	LLDPMED       bool
@@ -573,7 +611,8 @@ type Capabilities struct {
 	PortIsolation bool
 	SNMP          bool // DeviceController honours SNMPCommunity
 	// MirrorSessions / AggregateSessions are the counts the UI is told; 0
-	// hides the feature.
+	// hides the feature. Reported operational aggregations establish a
+	// minimum AggregateSessions without enabling LACP configuration control.
 	MirrorSessions    int
 	AggregateSessions int
 }

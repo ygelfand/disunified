@@ -254,7 +254,7 @@ func switchCaps(c devicemodel.Capabilities) map[string]any {
 // (SSH, STA_STAT, LLDP) plus LAG and SNMP when honoured.
 func FWCapsFor(c devicemodel.Capabilities) int {
 	bits := fwCapSSH | fwCapSTAT | fwCapLLDP
-	if c.LACP {
+	if c.LACP || c.LAGReporting {
 		bits |= fwCapLAG
 	}
 	if c.SNMP {

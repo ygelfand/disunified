@@ -1,10 +1,7 @@
 # Support matrix — what is verified, what is not, and how to extend it
 
-Every driver here was written against one real device on one site and
-verified end to end against Network 10.6.106. Nothing is claimed beyond
-that. This file says, per driver, what has actually run, what is expected
-to work but has not, what is expected *not* to work, and — for each gap —
-exactly what a pull request needs to close it.
+This matrix lists tested hardware and software versions, supported features,
+verification status, and the evidence needed to close each remaining gap.
 
 **This file is meant to be amended by contributors, including AI agents.**
 Every gap below is labelled **PRs welcome** and says what the proof is; the
@@ -17,6 +14,24 @@ The rule that makes a PR mergeable: **a capture, not a claim.** A new row in a
 "verified" table comes with a scrubbed fixture under `docs/fixtures/`, a test
 that reads it, and the live check recorded in the PR
 ([`CONTRIBUTING.md`](../CONTRIBUTING.md)).
+
+---
+
+## `cisco-iosxe` — Cisco IOS XE through NETCONF
+
+Write-up: [`drivers/cisco-iosxe.md`](drivers/cisco-iosxe.md).
+Fixtures: [`fixtures/cisco-iosxe/`](fixtures/cisco-iosxe/).
+
+| Feature | Supported behavior |
+|---|---|
+| Connection | NETCONF over SSH or mutual TLS |
+| Monitoring | Physical ports, counters, LLDP/CDP, VLANs, learned clients, PoE and hardware health |
+| Port control | Descriptions, admin state, known-media speed/autonegotiation, BPDU guard, physical-port STP edge mode, PoE auto/off, LACP membership, VLAN creation, and access/trunk membership on ports and port-channels |
+| Writes | Validated merge into running configuration, rollback-on-error, and readback |
+| Model selection | Catalogue selection from physical port layout |
+| Persistence | Optional running-to-startup save after verified edits, with pending-save recovery |
+
+See the write-up for authentication settings and control restrictions.
 
 ---
 

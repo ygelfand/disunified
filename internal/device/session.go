@@ -14,6 +14,7 @@ import (
 	"crypto/sha1"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -87,6 +88,7 @@ func (s *Session) SetNUTClients(f func() []string) {
 // default key, pending, CBC). informURL is used unless st already carries one
 // from a set-adopt. store may be nil.
 func NewSession(desc inform.Descriptor, informURL string, st State, store *Store, now time.Time) *Session {
+	st.Model = desc.Model
 	if st.Key == "" {
 		st.Key = inform.DefaultKey
 	}
@@ -108,6 +110,23 @@ func NewSession(desc inform.Descriptor, informURL string, st State, store *Store
 	s := &Session{desc: desc, st: st, store: store, bootTime: now, caps: DefaultCapabilities}
 	s.macHeader = macHeader(desc.MAC)
 	return s
+}
+
+// SetPendingProfile changes the presentation before adoption while preserving
+// device identity. An adopted profile requires an explicit configuration change.
+func (s *Session) SetPendingProfile(desc inform.Descriptor) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.st.Adopted {
+		return fmt.Errorf("cannot change an adopted profile automatically")
+	}
+	if desc.MAC != s.desc.MAC || desc.Serial != s.desc.Serial || desc.Type != s.desc.Type {
+		return fmt.Errorf("profile change must preserve device identity and type")
+	}
+	desc.Ports = slices.Clone(desc.Ports)
+	s.desc = desc
+	s.st.Model = desc.Model
+	return nil
 }
 
 func (s *Session) AuthKey() string {
@@ -328,7 +347,25 @@ func (s *Session) buildPayload(now time.Time) []byte {
 		} else if s.snap != nil {
 			m["has_temperature"] = false // no sensor (a VM host): said outright, as a sensorless device does
 		}
-		m["switch_caps"] = switchCaps(s.caps)
+		caps := s.caps
+		if caps.LAGReporting && s.snap != nil {
+			// Existing groups establish a minimum capacity even when the
+			// driver cannot create groups. The controller validates imported
+			// aggregation overrides against this limit.
+			groups := map[int]bool{}
+			for _, group := range s.snap.Aggregations {
+				if group.ID > 0 && len(group.Members) > 1 {
+					groups[group.ID] = true
+				}
+			}
+			for _, port := range s.snap.Ports {
+				if port.LAGID > 0 {
+					groups[port.LAGID] = true
+				}
+			}
+			caps.AggregateSessions = max(caps.AggregateSessions, len(groups))
+		}
+		m["switch_caps"] = switchCaps(caps)
 		pt := portTable(s.desc, s.snap, s.st.Provisioned["port_table"], s.prevHistory)
 		m["port_table"] = pt
 		// Device-level satisfaction (the Experience column): the mean of the
@@ -346,7 +383,11 @@ func (s *Session) buildPayload(now time.Time) []byte {
 		if s.snap != nil {
 			s.prevHistory = make(map[int]portHistory, len(s.snap.Ports))
 			for _, p := range s.snap.Ports {
-				s.prevHistory[p.Index] = portHistory{At: s.snap.TakenAt, Counters: p.Counters, LinkChanges: p.Health.LinkChanges,
+				counters := p.Counters
+				if group, ok := aggregateForPort(s.snap, p.Index); ok && group.HasCounters {
+					counters = group.Counters
+				}
+				s.prevHistory[p.Index] = portHistory{At: s.snap.TakenAt, Counters: counters, LinkChanges: p.Health.LinkChanges,
 					STPChanges: p.Health.STPChanges, FECUncorrected: p.Health.FECUncorrected, PCSErrBlocks: p.Health.PCSErrBlocks}
 			}
 		}

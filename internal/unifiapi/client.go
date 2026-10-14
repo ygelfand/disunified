@@ -27,7 +27,14 @@ type Client struct {
 	// outlet_overrides but rejects any update carrying port_overrides with
 	// api.err.Invalid (2026-09-26), so Provision names the device only.
 	PowerPath bool
-	http      *http.Client
+	// SyncLAGs seeds missing controller aggregations from collected membership.
+	SyncLAGs bool
+	// SyncNames enables ongoing port-name synchronization in observation order.
+	SyncNames bool
+	// NameStatePath isolates persisted observations for this bridged device.
+	NameStatePath string
+	nameState     map[int]nameObservation
+	http          *http.Client
 }
 
 // New builds a client. insecure skips TLS verification (self-signed).
@@ -116,5 +123,22 @@ func (c *Client) DeviceByMAC(ctx context.Context, mac string) (*Device, error) {
 // controller merges top-level fields but replaces port_overrides wholesale,
 // so callers pass the complete list.
 func (c *Client) UpdateDevice(ctx context.Context, id string, fields map[string]any) error {
-	return c.do(ctx, http.MethodPut, "/proxy/network/api/s/"+c.Site+"/rest/device/"+id, fields, nil)
+	writable := make(map[string]any, len(fields))
+	for key, value := range fields {
+		writable[key] = value
+	}
+	if overrides, ok := fields["port_overrides"].([]map[string]any); ok {
+		clean := make([]map[string]any, 0, len(overrides))
+		for _, override := range overrides {
+			port := make(map[string]any, len(override))
+			for key, value := range override {
+				if key != "lag_idx" && key != "port_poe" {
+					port[key] = value
+				}
+			}
+			clean = append(clean, port)
+		}
+		writable["port_overrides"] = clean
+	}
+	return c.do(ctx, http.MethodPut, "/proxy/network/api/s/"+c.Site+"/rest/device/"+id, writable, nil)
 }

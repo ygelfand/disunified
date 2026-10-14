@@ -133,8 +133,14 @@ func Suggest(l Layout) (Candidate, error) {
 		return best, nil
 	}
 	for _, c := range ranked {
-		if c.Model == Fallback {
+		if c.Model == Fallback && c.Ports >= l.Total() {
 			c.Note = fmt.Sprintf("no catalogue model has %d ports (closest by layout: %s with %d); claiming the USW Leaf, which has no firmware releases and so never triggers upgrade offers", l.Total(), best.Model, best.Ports)
+			return c, nil
+		}
+	}
+	for _, c := range ranked {
+		if c.Ports >= l.Total() {
+			c.Note = fmt.Sprintf("no exact catalogue layout; using %s with %d ports to cover %d physical slots", c.Model, c.Ports, l.Total())
 			return c, nil
 		}
 	}

@@ -19,6 +19,7 @@ type State struct {
 	UseAESGCM   bool                       `json:"use_aes_gcm"`
 	InformURL   string                     `json:"inform_url"`
 	Provisioned map[string]json.RawMessage `json:"provisioned,omitempty"` // setstate tables, echoed back
+	Model       string                     `json:"model,omitempty"`       // adopted presentation profile
 
 	// SystemCfg is the last system_cfg fully applied to the switch, and
 	// CfgVersion above is its version. A push that has not been applied yet
@@ -51,7 +52,7 @@ func (st State) clone() State {
 }
 
 func (st State) equal(o State) bool {
-	if st.Key != o.Key || st.CfgVersion != o.CfgVersion || st.Adopted != o.Adopted ||
+	if st.Key != o.Key || st.Model != o.Model || st.CfgVersion != o.CfgVersion || st.Adopted != o.Adopted ||
 		st.UseAESGCM != o.UseAESGCM || st.InformURL != o.InformURL || len(st.Provisioned) != len(o.Provisioned) ||
 		st.SystemCfg != o.SystemCfg || st.PendingCfgVersion != o.PendingCfgVersion || st.PendingSystemCfg != o.PendingSystemCfg ||
 		st.Firmware != o.Firmware || st.FirmwareBase != o.FirmwareBase {

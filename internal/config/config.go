@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -33,6 +34,8 @@ type Controller struct {
 	APIURL    string `yaml:"api_url"`     // optional: https://<controller> for the REST API (naming)
 	APIKeyEnv string `yaml:"api_key_env"` // env var holding the API key (default DUI_UNIFI_API_KEY, then STU_UNIFI_API_KEY)
 	Site      string `yaml:"site"`        // default "default"
+	SyncLAGs  bool   `yaml:"sync_lags"`   // seed missing controller aggregations through the optional API
+	SyncNames bool   `yaml:"sync_names"`  // ongoing port names in bridge-observed change order
 }
 
 // Device is one bridged device (a switch, today).
@@ -49,8 +52,13 @@ type Device struct {
 	// Auth: "" means a url needs username/password (an API endpoint without
 	// them is the usual misconfiguration); "none" says the device has no
 	// credentials at all (Modbus TCP on a UPS's SmartConnect port).
+	// "transport" delegates authentication validation to the driver, e.g.
+	// NETCONF SSH keys or mutual TLS certificates instead of a URL password.
 	Auth    string            `yaml:"auth"`
 	Options map[string]string `yaml:"options"` // driver-specific knobs
+	// CollectTimeout bounds a complete poll and control cycle; zero uses
+	// the loop's default. Individual transports retain their RPC deadlines.
+	CollectTimeout time.Duration `yaml:"collect_timeout"`
 
 	Model        string `yaml:"model"`         // UniFi model to claim; "auto" (default) picks by port layout
 	IP           string `yaml:"ip"`            // reported device IP (default: the switch address when it is an IP literal)
@@ -111,6 +119,9 @@ func Load(path string) (*File, error) {
 	if f.Controller.Host == "" && f.Controller.InformURL == "" {
 		return nil, fmt.Errorf("%s: controller.host (or inform_url) is required", path)
 	}
+	if (f.Controller.SyncLAGs || f.Controller.SyncNames) && f.Controller.APIURL == "" {
+		return nil, fmt.Errorf("%s: controller API synchronization requires controller.api_url", path)
+	}
 	if f.Controller.APIKeyEnv == "" {
 		// DUI_ is the project's prefix; STU_ is the pre-rename one, still read.
 		if os.Getenv("DUI_UNIFI_API_KEY") != "" {
@@ -152,6 +163,9 @@ func Load(path string) (*File, error) {
 		if s.Driver == "" {
 			return nil, fmt.Errorf("%s: device %q: driver is required", path, s.Name)
 		}
+		if s.CollectTimeout < 0 {
+			return nil, fmt.Errorf("%s: device %q: collect_timeout must be positive", path, s.Name)
+		}
 		if s.URL == "" && s.SSH == "" {
 			return nil, fmt.Errorf("%s: device %q: url or ssh is required", path, s.Name)
 		}
@@ -174,8 +188,10 @@ func Load(path string) (*File, error) {
 			}
 		case "none":
 			// A credential-less transport, declared rather than inferred.
+		case "transport":
+			// Keys/certificates and their validation belong to the driver.
 		default:
-			return nil, fmt.Errorf("%s: device %q: auth must be \"none\" or unset, got %q", path, s.Name, s.Auth)
+			return nil, fmt.Errorf("%s: device %q: auth must be \"none\", \"transport\" or unset, got %q", path, s.Name, s.Auth)
 		}
 	}
 	return &f, nil

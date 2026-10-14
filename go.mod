@@ -8,6 +8,7 @@ require (
 	github.com/jlaffaye/ftp v0.2.4
 	golang.org/x/crypto v0.57.0
 	gopkg.in/yaml.v3 v3.0.1
+	nemith.io/netconf v0.0.5-0.20260615165117-028d53508731
 )
 
 require (

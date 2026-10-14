@@ -134,12 +134,19 @@ type Config struct {
 	// OnLayoutChange runs after a collect whose port layout (lane counts,
 	// interface names) differs from the previous one — a cage split or joined.
 	OnLayoutChange func(snap *devicemodel.Snapshot)
+	// OnCollected runs after a successful collection with fresh device state.
+	OnCollected func(snap *devicemodel.Snapshot)
+	// SyncNames preserves locally observed descriptions during startup replay;
+	// fresh controller pushes still apply through the normal control path.
+	SyncNames bool
 	// DeviceHost is the address the bridge reaches the switch at, for the
 	// out-of-band management warning ("" = unknown).
 	DeviceHost string
 	// GatewayIP is the controller/gateway address; the switch's ARP entry
 	// for it is reported as gateway_mac ("" = skip).
 	GatewayIP string
+	// UplinkPort pins an operator-selected port; zero uses driver inference.
+	UplinkPort int
 
 	// OnSystemCfg runs with every system_cfg the controller pushes (and the
 	// last applied one at startup): the SSH gateway takes its credentials
@@ -455,6 +462,10 @@ func (l *Loop) cyclePorts(ctx context.Context) {
 		return
 	}
 	for _, idx := range queue {
+		if l.cfg.ControlPorts != nil && !l.cfg.ControlPorts[idx] {
+			l.cfg.Logger.Printf("[%s] port-cycle %d is outside the writable port allowlist; ignored", l.desc.MAC, idx)
+			continue
+		}
 		cctx, cancel := context.WithTimeout(ctx, l.cfg.CollectTimeout)
 		err := pc.CyclePort(cctx, idx)
 		cancel()
@@ -517,6 +528,16 @@ func (l *Loop) reconcile(ctx context.Context) {
 	l.installSSHKeys(cctx, text)
 	l.applyAddress(cctx, "", text)
 	desired := l.withholdFreshPorts(l.desiredPorts(text))
+	if snap := l.session.Snapshot(); l.cfg.SyncNames && snap != nil {
+		for i := range desired {
+			for _, port := range snap.Ports {
+				if port.Index == desired[i].Index {
+					desired[i].Description = port.Description
+					break
+				}
+			}
+		}
+	}
 	changed, err := l.cfg.Controller.ApplyPorts(cctx, desired)
 	if err != nil {
 		l.cfg.Logger.Printf("[%s] reconcile system_cfg %s: %v", l.desc.MAC, ver, err)
@@ -603,7 +624,7 @@ func (l *Loop) desiredPorts(text string) []devicemodel.PortDesired {
 			continue
 		}
 		p := cfg.Ports[idx]
-		d := devicemodel.PortDesired{Index: idx, Enabled: p.Enabled}
+		d := devicemodel.PortDesired{Index: idx, Enabled: p.Enabled, PoEMode: p.PoEMode}
 		if !l.isDefaultName(idx, p.Name) {
 			d.Description = p.Name
 		}
@@ -677,6 +698,11 @@ func (l *Loop) warnUnsupported(ver, text string) {
 	cfg := unificfg.Parse(text)
 	feats := map[string]string{}
 	for k, v := range unsupportedFeatures {
+		if k == ".poe" {
+			if capable, ok := l.cfg.Controller.(devicemodel.Capable); ok && capable.Capabilities().PoE {
+				continue
+			}
+		}
 		if v != "" {
 			feats[k] = v
 		}
@@ -1109,7 +1135,11 @@ func (l *Loop) collect(ctx context.Context) {
 	}
 	l.session.SetGatewayIP(l.cfg.GatewayIP)
 	l.session.SetSnapshot(snap)
-	if up := snap.UplinkPort(); up > 0 && up != l.uplinkPort {
+	up := l.cfg.UplinkPort
+	if up == 0 {
+		up = snap.UplinkPort()
+	}
+	if up > 0 && up != l.uplinkPort {
 		if l.uplinkPort != 0 {
 			l.cfg.Logger.Printf("[%s] uplink is now port %d (was %d)", l.desc.MAC, up, l.uplinkPort)
 		}
@@ -1164,6 +1194,9 @@ func (l *Loop) collect(ctx context.Context) {
 			}
 		}
 		l.layoutByPort = byPort
+	}
+	if l.cfg.OnCollected != nil {
+		l.cfg.OnCollected(snap)
 	}
 }
 

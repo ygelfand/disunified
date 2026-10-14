@@ -127,6 +127,7 @@ type Port struct {
 	AutoNeg    bool
 	SpeedMbps  int
 	FullDuplex bool
+	PoEMode    string
 
 	// VLAN membership. VLANExplicit is true when the controller sent any
 	// switch.vlan.<slot>.port.N.mode line for this port; then NativeVLAN is
@@ -289,6 +290,11 @@ func Parse(text string) *Config {
 				p.SpeedMbps, _ = strconv.Atoi(v)
 			case "duplex":
 				p.FullDuplex = v == "enabled"
+			case "poe", "poe.opmode", "poe.mode":
+				p.PoEMode = v
+				if v == "shutdown" {
+					p.PoEMode = "off"
+				}
 			case "lag":
 				p.LAG, _ = strconv.Atoi(v)
 			case "mirror_port":

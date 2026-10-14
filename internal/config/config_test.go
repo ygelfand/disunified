@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadExample(t *testing.T) {
@@ -27,6 +28,27 @@ func TestLoadExample(t *testing.T) {
 	pdu := f.Devices[2]
 	if pdu.Driver != "apc-pdu" || pdu.URL != "192.0.2.20" || pdu.Control.Outlets != "all" || !pdu.Control.Address || pdu.Username != "apc" {
 		t.Errorf("pdu-1 = %+v", pdu)
+	}
+}
+
+func TestCollectTimeoutDuration(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.yaml")
+	base := "controller:\n  host: 192.0.2.1\ndevices:\n  - name: switch\n    driver: cisco-iosxe\n    ssh: admin@192.0.2.2\n    collect_timeout: "
+	if err := os.WriteFile(p, []byte(base+"60s\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Devices[0].CollectTimeout != time.Minute {
+		t.Errorf("timeout=%s", f.Devices[0].CollectTimeout)
+	}
+	if err := os.WriteFile(p, []byte(base+"-1s\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(p); err == nil {
+		t.Fatal("negative timeout accepted")
 	}
 }
 
@@ -68,6 +90,20 @@ func TestLoadRejectsBothDevicesAndSwitches(t *testing.T) {
 
 // A device with no credentials at all (Modbus TCP) says so explicitly; the
 // guard for API endpoints that forgot theirs stays.
+func TestURLWithTransportAuthNeedsNoPassword(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(p, []byte("controller:\n  host: 192.0.2.1\ndevices:\n  - name: cisco\n    driver: cisco-iosxe\n    url: netconf+tls://switch.example.net:6513\n    auth: transport\n    options:\n      tls_cert: /tmp/client.crt\n      tls_key: /tmp/client.key\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Devices[0].Auth != "transport" {
+		t.Fatalf("auth=%q", f.Devices[0].Auth)
+	}
+}
+
 func TestURLWithAuthNoneNeedsNoCredentials(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "c.yaml")
 	os.WriteFile(p, []byte("controller:\n  host: 192.0.2.1\ndevices:\n  - name: u\n    driver: apc-ups\n    url: 192.0.2.30\n    auth: none\n"), 0o644)

@@ -121,11 +121,24 @@ func portAnomalies(p devicemodel.Port, isUplink bool, prev *portHistory) (bits i
 }
 
 func portTable(desc inform.Descriptor, snap *devicemodel.Snapshot, provisioned json.RawMessage, prev map[int]portHistory) []map[string]any {
+	if snap == nil {
+		return nil
+	}
 	live := map[int]devicemodel.Port{}
-	if snap != nil {
-		for _, p := range snap.Ports {
-			live[p.Index] = p
+	for _, p := range snap.Ports {
+		live[p.Index] = p
+	}
+	for _, group := range snap.Aggregations {
+		if !group.HasCounters || len(group.Members) == 0 {
+			continue
 		}
+		index := group.Members[0].PortIndex
+		port, ok := live[index]
+		if !ok {
+			continue
+		}
+		port.Counters = group.Counters
+		live[index] = port
 	}
 	pushed := map[int]map[string]any{}
 	if len(provisioned) > 0 {
@@ -209,10 +222,26 @@ func portTable(desc inform.Descriptor, snap *devicemodel.Snapshot, provisioned j
 			table = append(table, e)
 			continue
 		}
-		if snap != nil && p.Description != "" {
+		if p.Description != "" {
 			e["name"] = p.Description
 		}
 		e["enable"] = p.Enabled
+		if power := p.PoE; power != nil {
+			e["port_poe"] = true
+			e["poe_caps"] = 1
+			if power.SupportsAT {
+				e["poe_caps"] = 3
+			}
+			e["poe_mode"] = power.Mode
+			e["poe_enable"] = power.Mode != "off"
+			e["poe_good"] = power.Delivering
+			if power.HasMetering {
+				e["poe_power"] = fmt.Sprintf("%.2f", power.PowerW)
+			}
+			if power.MaxPowerW > 0 {
+				e["poe_maxpower"] = power.MaxPowerW
+			}
+		}
 		e["up"] = p.Up
 		e["speed"] = p.SpeedMbps
 		e["full_duplex"] = p.FullDuplex
@@ -252,6 +281,61 @@ func portTable(desc inform.Descriptor, snap *devicemodel.Snapshot, provisioned j
 				e["op_mode"] = "switch"
 			}
 			e["aggregated_by"] = false
+		}
+		if snap.Aggregations != nil {
+			for _, key := range []string{"lag_idx", "lag_member", "aggregate_members", "aggregate_num_ports", "lacp_state"} {
+				delete(e, key)
+			}
+			e["masked"] = false
+		}
+		for _, group := range snap.Aggregations {
+			member := false
+			for _, m := range group.Members {
+				if m.PortIndex == p.Index {
+					member = true
+					break
+				}
+			}
+			if !member {
+				continue
+			}
+			e["lag_member"] = true
+			if group.ID > 0 {
+				e["lag_idx"] = group.ID
+			}
+			if len(group.Members) > 0 && group.Members[0].PortIndex == p.Index {
+				e["op_mode"] = "aggregate"
+				e["masked"] = false
+				e["aggregated_by"] = false
+				members := make([]int, 0, len(group.Members))
+				for _, m := range group.Members {
+					members = append(members, m.PortIndex)
+				}
+				e["aggregate_members"] = members
+				e["is_uplink"] = false
+				for _, port := range desc.Ports {
+					if port.IsUplink {
+						for _, m := range group.Members {
+							if m.PortIndex == port.PortIdx {
+								e["is_uplink"] = true
+							}
+						}
+					}
+				}
+				e["up"] = group.Up
+				e["aggregate_num_ports"] = len(group.Members)
+				states := make([]map[string]any, 0, len(group.Members))
+				for _, m := range group.Members {
+					states = append(states, map[string]any{"member_port": m.PortIndex, "active": m.Active, "speed": m.SpeedMbps})
+				}
+				e["lacp_state"] = states
+			} else {
+				e["op_mode"] = "switch"
+				e["masked"] = true
+				e["aggregated_by"] = group.Members[0].PortIndex
+				e["is_uplink"] = false
+			}
+			break
 		}
 		if p.FEC != devicemodel.FECUnknown {
 			// Real informs carry `fec` in the 802.3 clause vocabulary; the
@@ -359,7 +443,35 @@ func deviceTables(desc inform.Descriptor, snap *devicemodel.Snapshot) map[string
 	if snap == nil {
 		return m
 	}
+	if snap.Aggregations != nil {
+		groups := make([]map[string]any, 0, len(snap.Aggregations))
+		for _, group := range snap.Aggregations {
+			if group.ID <= 0 || len(group.Members) == 0 {
+				continue
+			}
+			members := make([]int, 0, len(group.Members))
+			for _, member := range group.Members {
+				members = append(members, member.PortIndex)
+			}
+			groups = append(groups, map[string]any{"lag_idx": group.ID, "aggregate_members": members, "type": "lag"})
+		}
+		m["link_aggregation_groups"] = groups
+	}
 	sys := snap.System
+	if sys.PoEBudgetW > 0 {
+		m["total_max_power"] = sys.PoEBudgetW
+		var used float64
+		measured := false
+		for _, port := range snap.Ports {
+			if port.PoE != nil && port.PoE.HasMetering {
+				used += port.PoE.PowerW
+				measured = true
+			}
+		}
+		if measured {
+			m["total_used_power"] = round2(used)
+		}
+	}
 	if sys.STPMode != "" {
 		m["stp_version"] = sys.STPMode
 	}
@@ -419,7 +531,9 @@ func deviceTables(desc inform.Descriptor, snap *devicemodel.Snapshot) map[string
 			}
 			psus = append(psus, e)
 		}
-		m["total_max_power"] = int(capW)
+		if sys.PoEBudgetW == 0 {
+			m["total_max_power"] = int(capW)
+		}
 		m["power_consumption"] = round1(outW)
 		m["psu_table"] = psus
 	}
@@ -457,6 +571,10 @@ func deviceTables(desc inform.Descriptor, snap *devicemodel.Snapshot) map[string
 			if p.Index != up {
 				continue
 			}
+			counters := p.Counters
+			if group, ok := aggregateForPort(snap, up); ok && group.HasCounters {
+				counters = group.Counters
+			}
 			// A UniFi switch reports `uplink` as the NAME of its management
 			// interface in if_table (a string, "eth0"), never as an object;
 			// the controller composes the uplink record from that interface,
@@ -465,11 +583,11 @@ func deviceTables(desc inform.Descriptor, snap *devicemodel.Snapshot) map[string
 			m["if_table"] = []map[string]any{{
 				"name": "eth0", "mac": desc.MAC, "ip": desc.IP, "netmask": netmaskFor(snap, desc.IP), "num_port": len(desc.Ports),
 				"up": p.Up, "speed": p.SpeedMbps, "full_duplex": p.FullDuplex,
-				"rx_bytes": p.Counters.RxBytes, "tx_bytes": p.Counters.TxBytes,
-				"rx_packets": p.Counters.RxPackets, "tx_packets": p.Counters.TxPackets,
-				"rx_errors": p.Counters.RxErrors, "tx_errors": p.Counters.TxErrors,
-				"rx_dropped": p.Counters.RxDropped, "tx_dropped": p.Counters.TxDropped,
-				"rx_multicast": p.Counters.RxMulticast,
+				"rx_bytes": counters.RxBytes, "tx_bytes": counters.TxBytes,
+				"rx_packets": counters.RxPackets, "tx_packets": counters.TxPackets,
+				"rx_errors": counters.RxErrors, "tx_errors": counters.TxErrors,
+				"rx_dropped": counters.RxDropped, "tx_dropped": counters.TxDropped,
+				"rx_multicast": counters.RxMulticast,
 			}}
 		}
 	}
@@ -516,6 +634,18 @@ func deviceTables(desc inform.Descriptor, snap *devicemodel.Snapshot) map[string
 		}
 	}
 	return m
+}
+
+func aggregateForPort(snap *devicemodel.Snapshot, index int) (devicemodel.Aggregation, bool) {
+	if snap == nil {
+		return devicemodel.Aggregation{}, false
+	}
+	for _, group := range snap.Aggregations {
+		if len(group.Members) > 0 && group.Members[0].PortIndex == index {
+			return group, true
+		}
+	}
+	return devicemodel.Aggregation{}, false
 }
 
 // outletTable renders a power device's outlets.
@@ -654,16 +784,15 @@ func trailingInt(s string) int {
 }
 
 // unifiMedia maps the neutral media vocabulary onto the controller's port
-// media labels (seen in its hardware DB: GE, 2.5GbE, 10GbE, SFP, SFP+,
-// SFP28, QSFP28). "" = keep the profile's label.
+// media labels accepted by the inform parser. "" keeps the profile's label.
 func unifiMedia(m devicemodel.Media) string {
 	switch m {
 	case devicemodel.MediaCopper1G:
 		return "GE"
 	case devicemodel.MediaCopper2G5:
-		return "2.5GbE"
+		return "2.5GE"
 	case devicemodel.MediaCopper10G:
-		return "10GbE"
+		return "10GE"
 	case devicemodel.MediaSFP:
 		return "SFP"
 	case devicemodel.MediaSFPPlus:
@@ -671,7 +800,7 @@ func unifiMedia(m devicemodel.Media) string {
 	case devicemodel.MediaSFP28:
 		return "SFP28"
 	case devicemodel.MediaQSFPPlus:
-		return "QSFP+"
+		return "QSFP28" // controller QSFP family; speed_caps carries the actual limits
 	case devicemodel.MediaQSFP28:
 		return "QSFP28"
 	}

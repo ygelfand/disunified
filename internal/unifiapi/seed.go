@@ -90,6 +90,12 @@ func (c *Client) SeedPortConfig(ctx context.Context, mac string, snap *devicemod
 // non-default forwarding mode, a tagged-VLAN choice or port security means
 // somebody set the port.
 func configured(o map[string]any) bool {
+	if mode, _ := o["op_mode"].(string); mode != "" && mode != "switch" {
+		return true
+	}
+	if o["aggregate_members"] != nil || o["lag_idx"] != nil {
+		return true
+	}
 	if _, ok := o["portconf_id"]; ok {
 		return true
 	}
@@ -199,6 +205,14 @@ func seedOverrides(snap *devicemodel.Snapshot, nets []Network, existing []map[st
 	}
 	for _, p := range snap.Ports {
 		o := byIdx[p.Index]
+		if p.PoE != nil && (p.PoE.Mode == "auto" || p.PoE.Mode == "off") && o["poe_mode"] == nil {
+			if o == nil {
+				o = map[string]any{"port_idx": p.Index}
+				byIdx[p.Index] = o
+			}
+			o["poe_mode"] = p.PoE.Mode
+			seeded++
+		}
 		if p.IfName == "" && !p.Present {
 			// A free slot: disabled, and nothing else left over.
 			if o != nil && isDisabledOverride(o) && !releaseOverride(o) {
@@ -234,6 +248,16 @@ func seedOverrides(snap *devicemodel.Snapshot, nets []Network, existing []map[st
 				}
 				seeded++
 			}
+			continue
+		}
+		matches := o != nil
+		for key, value := range seed {
+			if !sameJSON(o[key], value) {
+				matches = false
+				break
+			}
+		}
+		if matches {
 			continue
 		}
 		if o == nil {

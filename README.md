@@ -2,7 +2,7 @@
 
 A bridge that makes a non-UniFi device appear as a real, adopted UniFi
 device inside the UniFi Network controller — ports, stats, topology, and
-control. What it supports today: physical and virtual switches (an Arista,
+control. What it supports today: physical and virtual switches (Arista, Cisco,
 Proxmox nodes, a Podman host), a rack PDU and two kinds of UPS; the inform, adoption
 and control machinery underneath carries no vendor or device-type
 assumptions.
@@ -14,22 +14,20 @@ place that device is managed from.
 
 ## Supported devices
 
-Everything below is verified live on UniFi Network 10.6 (a UniFi OS gateway),
-end to end from the UniFi UI — read (ports or outlets, stats, topology) and
-control (the controller's config applied back to the device).
+Drivers translate device state and controller settings through the vendor's
+management interface. Feature coverage is documented in each driver's guide.
 
-| Device | Driver | Presented to UniFi as | Verified on |
-|---|---|---|---|
-| Arista EOS switch | `arista-eos` | `UDC48X6` ("USW Leaf") | DCS-7160-48TC6-F, EOS 4.26.14M |
-| Proxmox VE node (`vmbr0`) | `proxmox` | `UDC48X6` ("USW Leaf"), or `USWF07D` ("ECS Core") | three-node PVE 9.1 cluster |
-| APC switched rack PDU | `apc-pdu` | `USPPDUP` ("Smart Power PDU Pro") | AP7931, NMC AOS 3.9.2 |
-| Podman host (containers as ports) | `podman` | `UDC48X6` ("USW Leaf") | Podman 5.8.2, AlmaLinux 10.2 |
-| APC Smart-UPS (Modbus TCP on its SmartConnect port) | `apc-ups` | `USPDA2B` ("UPS 2U Pro"; `USWDA25` "UPS 2U" also works) | SMTL1500RM3UC, UPS 15.5 |
-| APC Back-UPS Pro network model (its NMC's web pages) | `apc-backups` | `USPDA2B` ("UPS 2U Pro") | BG500, UPS 05.3, NMC AOS 6.0.1 |
+| Device | Driver | Presented to UniFi as |
+|---|---|---|
+| Arista EOS switch | `arista-eos` | `UDC48X6` ("USW Leaf") |
+| Cisco IOS XE switch | `cisco-iosxe` | Switch model selected from port layout |
+| Proxmox VE node (`vmbr0`) | `proxmox` | `UDC48X6` ("USW Leaf"), or `USWF07D` ("ECS Core") |
+| APC switched rack PDU | `apc-pdu` | `USPPDUP` ("Smart Power PDU Pro") |
+| Podman host (containers as ports) | `podman` | `UDC48X6` ("USW Leaf") |
+| APC Smart-UPS (Modbus TCP on its SmartConnect port) | `apc-ups` | `USPDA2B` ("UPS 2U Pro"; `USWDA25` "UPS 2U" also works) |
+| APC Back-UPS Pro network model (its NMC's web pages) | `apc-backups` | `USPDA2B` ("UPS 2U Pro") |
 
-"Verified on" means exactly that one device. What each driver has and has
-not been tried on, and what a pull request needs to extend it (a PVE 8 node,
-a Fedora CoreOS Podman host, another Arista model…), is in
+Per-driver requirements and feature coverage are in
 [`docs/support-matrix.md`](docs/support-matrix.md) — every gap there is marked
 **PRs welcome** with the proof it needs.
 
@@ -44,6 +42,11 @@ and [`docs/adding-a-device.md`](docs/adding-a-device.md).
 
 What each driver does today:
 
+- **`cisco-iosxe`** — a physical Cisco IOS XE switch over NETCONF, using
+  SSH or mutual TLS. Reports ports, counters, LLDP/CDP neighbors, VLANs,
+  and hardware health; applies port descriptions, enable/disable, and
+  membership in existing VLANs
+  ([`docs/drivers/cisco-iosxe.md`](docs/drivers/cisco-iosxe.md)).
 - **`arista-eos`** — a physical Arista switch read over eAPI (or SSH).
   Adoption, live port stats and counters, LLDP and MAC-table topology
   (clients appear behind the right port), optics, FEC, fans/PSUs; and control
@@ -113,10 +116,10 @@ running it against anything you care about.
   the bridge from the device it manages. A wrong
   click in the UniFi UI, a controller bug, or a bug here can cut off the
   device, the hosts behind it, or the bridge itself.
-- **Verified on very little hardware:** the six drivers above, against UniFi
-  Network 10.6 on a UniFi OS gateway. Any other device, OS version or
-  controller version is untested. Several features are marked as modelled but
-  never verified live in [`docs/feature-map.md`](docs/feature-map.md).
+- **Limited hardware coverage:** compatibility depends on the device model,
+  software version, and controller version. Device requirements and feature
+  coverage are in [`docs/support-matrix.md`](docs/support-matrix.md) and
+  [`docs/feature-map.md`](docs/feature-map.md).
 - **It speaks an undocumented protocol** reverse-engineered by the
   unifi-emu project and by watching real devices. A controller update can
   change it and break this bridge silently, or make the controller push
@@ -130,13 +133,13 @@ running it against anything you care about.
 ## How it works
 
 ```
-UniFi controller  <── inform (TNBU/AES-GCM, every ~70 s) ──  disunified  <── eAPI/SSH/SNMP/Modbus ──  the device
+UniFi controller  <── inform (TNBU/AES-GCM, every ~70 s) ──  disunified  <── NETCONF/eAPI/SSH/SNMP/Modbus ──  the device
                   ── system_cfg pushes / adoption ──>                         ── config diffs ──>
 ```
 
 - [`internal/devicemodel`](internal/devicemodel) — the vendor-neutral model of a device and the
   driver contract.
-- `internal/drivers/<driver>` — one driver per vendor/OS (`arista-eos`, `proxmox`, `podman`, `apc-pdu`, `apc-ups`, `apc-backups`), each with its own [`CLAUDE.md`](CLAUDE.md) of working notes; its write-up is `docs/drivers/<driver>.md`, its captures `docs/fixtures/<driver>-<version>/`, its scrub script `scripts/sanitize-<driver>.py`, and its wire-contract and replay cases `internal/device/contract_<driver>_test.go` and `internal/informloop/replay_<driver>_test.go`.
+- `internal/drivers/<driver>` — one driver per vendor/OS (`arista-eos`, `cisco-iosxe`, `proxmox`, `podman`, `apc-pdu`, `apc-ups`, `apc-backups`), each with its own [`CLAUDE.md`](CLAUDE.md) of working notes; its write-up is `docs/drivers/<driver>.md`, its captures `docs/fixtures/<driver>/` or `docs/fixtures/<driver>-<version>/`, its scrub script `scripts/sanitize-<driver>.py`, and its wire-contract and replay cases `internal/device/contract_<driver>_test.go` and `internal/informloop/replay_<driver>_test.go`.
 - [`internal/device`](internal/device) — the inform session (forked from unifi-emu), payload,
   capability claims, persisted adoption state.
 - [`internal/unificfg`](internal/unificfg) — parses the controller's `system_cfg` pushes.
@@ -146,9 +149,16 @@ UniFi controller  <── inform (TNBU/AES-GCM, every ~70 s) ──  disunified 
 - [`internal/unifiapi`](internal/unifiapi) — controller REST API: names the device and its ports
   after the device itself on first provision, and seeds the controller's
   port/outlet overrides from the device's live state so the first push
-  changes nothing.
+  changes nothing. Optional `controller.sync_lags: true` also seeds missing
+  aggregation groups from collected membership.
+  `controller.sync_names: true` enables ongoing port names in the order the
+  bridge observes changes, with observations persisted per device.
+  Cisco port writes can also save running configuration to startup with
+  `options.save_config: "true"`; PoE controls and learned-client telemetry
+  use NETCONF.
 - [`internal/sshrun`](internal/sshrun) — the SSH transport the host drivers (Proxmox, Podman)
   share; [`internal/nutd`](internal/nutd) — the NUT server a UPS's "NUT Server" switch turns on.
+- [`internal/netconfrun`](internal/netconfrun) — shared NETCONF sessions over SSH or mutual TLS.
 
 ## Install
 
