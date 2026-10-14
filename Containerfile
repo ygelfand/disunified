@@ -2,7 +2,7 @@
 #
 # A multi-arch image (linux/amd64, linux/arm64) is published on every release,
 # so most installs never build this:
-#   podman pull ghcr.io/techblueprints/disunified:latest
+#   podman pull ghcr.io/<owner>/<repo>:latest
 # Build it yourself with either engine (Docker needs -f; Podman finds it):
 #   podman build -t disunified .
 #   docker build -f Containerfile -t disunified .
@@ -26,9 +26,10 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
 
 FROM gcr.io/distroless/static-debian12:nonroot
 ARG VERSION=dev
+ARG SOURCE_URL=""
 LABEL org.opencontainers.image.title="disunified" \
       org.opencontainers.image.description="Presents a non-UniFi switch to a UniFi Network controller as an adopted UniFi switch. Independent project, not affiliated with or endorsed by Ubiquiti Inc." \
-      org.opencontainers.image.source="https://github.com/TechBlueprints/disunified" \
+      org.opencontainers.image.source="${SOURCE_URL}" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.version="${VERSION}"
 COPY --from=build /disunified /disunified

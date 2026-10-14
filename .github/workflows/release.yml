@@ -1,6 +1,6 @@
 # Publishes the container image so that installing is "pull, configure, run".
 #
-#   push of a tag v*  -> ghcr.io/techblueprints/disunified:v1.2.3, :1.2.3,
+#   push of a tag v* -> ghcr.io/<owner>/<repo>:v1.2.3, :1.2.3,
 #                        :1.2 and :latest (a prerelease, v1.2.3-rc1, gets only
 #                        its own tag), plus a GitHub release with the static
 #                        binaries and their checksums
@@ -8,8 +8,9 @@
 #
 # Both platforms (linux/amd64, linux/arm64) come from one Go cross-compile per
 # arch, so no QEMU is involved. Nothing here needs a secret beyond the
-# automatic GITHUB_TOKEN. The GHCR package must be made public once, by hand,
-# after the first push (see docs/releasing.md) or pulls need a login.
+# automatic GITHUB_TOKEN. The current repository's GHCR package must be made
+# public once, by hand, after the first push (see docs/releasing.md) or pulls
+# need a login.
 name: release
 
 on:
@@ -19,20 +20,23 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write   # create the GitHub release
-  packages: write   # push to GHCR
-
-env:
-  # GHCR paths must be lowercase, whatever the owner's spelling is.
-  IMAGE: ghcr.io/techblueprints/disunified
+  contents: write
+  packages: write
 
 jobs:
   image:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.plan.outputs.version }}
+      image: ${{ steps.image.outputs.image }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve image name from this repository
+        id: image
+        run: |
+          image=$(printf 'ghcr.io/%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          echo "image=$image" >> "$GITHUB_OUTPUT"
 
       - name: Work out the version and the image tags
         id: plan
@@ -55,6 +59,8 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tags=$tags" >> "$GITHUB_OUTPUT"
           echo "building $version with:$tags"
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
 
       - name: Log in to GHCR
         run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
@@ -67,9 +73,12 @@ jobs:
           docker buildx create --use --name disunified --driver docker-container
           docker buildx build --platform linux/amd64,linux/arm64 \
             --file Containerfile --build-arg "VERSION=$VERSION" \
+            --build-arg "SOURCE_URL=https://github.com/$GITHUB_REPOSITORY" \
             $TAGS --push .
         env:
           VERSION: ${{ steps.plan.outputs.version }}
+          IMAGE: ${{ steps.image.outputs.image }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           TAGS: ${{ steps.plan.outputs.tags }}
 
       - name: Run the pushed image's one-shots
@@ -78,12 +87,17 @@ jobs:
           docker run --rm "$IMAGE:$VERSION" -build-version
           docker run --rm "$IMAGE:$VERSION" -list-drivers
         env:
+          IMAGE: ${{ steps.image.outputs.image }}
           VERSION: ${{ steps.plan.outputs.version }}
 
   release:
     needs: image
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      IMAGE: ${{ needs.image.outputs.image }}
     steps:
       - uses: actions/checkout@v4
         with:
