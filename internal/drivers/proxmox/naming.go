@@ -28,10 +28,10 @@ func (c *Collector) DefaultDeviceNames(sys devicemodel.System) []string {
 	return []string{name}
 }
 
-// PortName names a guest port "VM-<vmid>" ("VM-119 net1" when the guest
-// has several NICs), a physical port after its NIC, and an unused slot
-// "Open-<port>" (Clint, 2026-09-20: a free slot should read as one, not
-// as the profile's "SFP28 26", and nothing is reserved for NICs).
+// PortName names a guest port after its guest name ("<name> net1"
+// when the guest has several NICs), a physical port after its NIC, and an
+// unused slot "Open-<port>" (a free slot should read as one, not as the
+// profile's "SFP28 26", and nothing is reserved for NICs).
 func (c *Collector) PortName(p devicemodel.Port) string {
 	if p.Description != "" {
 		return p.Description
@@ -79,17 +79,18 @@ func (c *Collector) DefaultPortNames(p devicemodel.Port) []string {
 	return out
 }
 
-// guestLabel is the port name for a guest NIC: "VM-100" ("CT-200" for a
-// container), plus the NIC when the guest has more than one on the bridge
-// ("VM-119 net1"). The guest's name is not part of it: the controller shows
-// the guest itself as the client behind the port, and a VMID is what a
-// Proxmox user reaches for (Clint, 2026-09-20).
+// guestLabel uses the guest name for a NIC, plus the NIC index when the guest
+// has more than one NIC on the bridge. The VMID is the fallback for unnamed
+// guests.
 func guestLabel(n guestNIC, multi bool) string {
-	prefix := "VM"
-	if n.Kind == "lxc" {
-		prefix = "CT"
+	label := n.Name
+	if label == "" {
+		prefix := "VM"
+		if n.Kind == "lxc" {
+			prefix = "CT"
+		}
+		label = fmt.Sprintf("%s-%d", prefix, n.VMID)
 	}
-	label := fmt.Sprintf("%s-%d", prefix, n.VMID)
 	if multi {
 		label += fmt.Sprintf(" net%d", n.Index)
 	}
@@ -100,9 +101,20 @@ func guestLabel(n guestNIC, multi bool) string {
 // ("100 proxy", "119 FusionHub net1"), so those still count as defaults.
 func legacyLabels(n guestNIC, multi bool) []string {
 	base := fmt.Sprintf("%d %s", n.VMID, n.Name)
-	out := []string{base, fmt.Sprintf("%d", n.VMID)}
+	prefix := "VM"
+	if n.Kind == "lxc" {
+		prefix = "CT"
+	}
+	idLabel := fmt.Sprintf("%s-%d", prefix, n.VMID)
+	out := []string{base, idLabel, fmt.Sprintf("%d", n.VMID)}
+	if n.Name != "" {
+		out = append(out, n.Name)
+	}
 	if multi {
-		out = append(out, fmt.Sprintf("%s net%d", base, n.Index))
+		out = append(out, fmt.Sprintf("%s net%d", idLabel, n.Index), fmt.Sprintf("%s net%d", base, n.Index))
+		if n.Name != "" {
+			out = append(out, fmt.Sprintf("%s net%d", n.Name, n.Index))
+		}
 	}
 	return out
 }
