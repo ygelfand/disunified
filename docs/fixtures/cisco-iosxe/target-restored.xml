@@ -1,0 +1,1 @@
+<?xml version="1.0" ?><data><native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native"><interface><GigabitEthernet><name>1/0/18</name><shutdown/><spanning-tree xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-spanning-tree"><portfast/></spanning-tree></GigabitEthernet></interface></native></data>

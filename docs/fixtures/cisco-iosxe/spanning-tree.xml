@@ -1,0 +1,1 @@
+<?xml version="1.0" ?><data><native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native"><spanning-tree><extend xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-spanning-tree"><system-id/></extend><mode xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-spanning-tree">rapid-pvst</mode></spanning-tree></native></data>
